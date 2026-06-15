@@ -168,3 +168,6 @@ bash "$(dirname "$0")/monitoring/kibana/setup.sh"
 echo ""
 echo "📊 Kibana dashboard : http://localhost:5601"
 echo "🔍 Elasticsearch   : http://localhost:9200"
+
+echo "Run seed"
+docker exec -it -d vuln-lab-backend-1 python3 seed.py

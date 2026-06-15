@@ -1,11 +1,6 @@
-# FILE: backend/seed.py
-# PURPOSE: Seed the database with demo users and XSS-payload comments
-# SECURITY NOTE: Stores plain-text passwords deliberately for SQL injection demo;
-#                NEVER do this in production
-
 import asyncio
 import bcrypt
-from sqlalchemy import text
+from sqlalchemy import text, select, func
 
 from database import engine, AsyncSessionLocal, Base
 from models.user import User
@@ -21,9 +16,13 @@ async def seed() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     async with AsyncSessionLocal() as session:
-        await session.execute(text("DELETE FROM comments"))
-        await session.execute(text("DELETE FROM users"))
-        await session.commit()
+        # Check xem đã có user nào chưa
+        result = await session.execute(select(func.count(User.id)))
+        user_count = result.scalar_one()
+
+        if user_count > 0:
+            print("Users already exist. Skip seeding.")
+            return
 
         users = [
             User(
@@ -45,6 +44,7 @@ async def seed() -> None:
                 role="user",
             ),
         ]
+
         session.add_all(users)
         await session.flush()
 
@@ -55,6 +55,7 @@ async def seed() -> None:
             Comment(user_id=users[1].id, content="<script>alert('XSS Demo!')</script>"),
             Comment(user_id=users[2].id, content='<img src=x onerror=alert(document.cookie)>'),
         ]
+
         session.add_all(comments)
         await session.commit()
 
