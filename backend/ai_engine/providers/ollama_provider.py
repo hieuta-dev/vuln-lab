@@ -19,71 +19,127 @@ logger = logging.getLogger(__name__)
 # ── Prompt templates ──────────────────────────────────────────────────────────
 
 SYSTEM_PROMPT = (
-    "You are a cybersecurity expert. Return ONLY a valid JSON object. "
-    "No markdown, no explanation, no code fences. Just the raw JSON object. "
+    "You are a cybersecurity expert and security scanner. "
+    "Return ONLY a valid JSON object — no markdown, no explanation, no code fences. "
+    "Base your findings ONLY on the probe results provided. "
+    "Do NOT assume a vulnerability exists unless evidence is present in the data. "
+    "NEVER use placeholder strings like 'example payload string' or '# vulnerable code example'. "
     "If you cannot complete the full JSON, return a minimal valid JSON."
 )
 
 USER_PROMPT_TEMPLATE = """\
-Generate a security lab scenario for vulnerability type "{vuln_type}" at "{difficulty}" level.
+You are a security scanner. Generate a structured vulnerability scenario for:
+- Vulnerability type: {vuln_type}
+- Difficulty: {difficulty}
+- Target URL: {target_url}
 
-Use these pre-computed payloads and risk data:
+Pre-computed probe data (use this as evidence):
 PAYLOADS: {payloads_json}
 RISK: {risk_json}
 
-Return EXACTLY this JSON structure (all fields required):
+CRITICAL RULES:
+1. Only set "status":"success" if the probe data contains direct evidence
+2. Use the actual target URL ({target_url}) in all reproduce steps — never use example.com
+3. NEVER put "Finding:" text inside numbered steps
+4. Severity: confirmed exploit=high/critical; missing header only=medium; no evidence=passed
+5. reproduce_steps must be: "1. Navigate to {target_url}/...", "2. Enter payload: [actual string]", "3. Observe: [specific response]"
+
+CRITICAL REQUIREMENTS FOR CODE EXAMPLES:
+- code_examples.vulnerable must contain 10-20 lines of actual broken code showing the vulnerability
+- code_examples.secure must contain the fixed version with inline comments
+- NEVER return "# secure code example" or "# vulnerable code example" alone
+- Use Python for backend examples, JavaScript for frontend examples
+
+CRITICAL REQUIREMENTS FOR STEPS:
+- step.payload = the EXACT string the tester types/sends (copy-paste ready)
+- step.description = action with exact URL path using {target_url}
+- step.expected_result = observable HTTP response or UI change
+
+CRITICAL REQUIREMENTS FOR PAYLOADS:
+- payload field = exact string to copy-paste (real SQL, HTML, or shell)
+- NEVER use: "example payload string", "exploit payload", "payload string"
+
+Return EXACTLY this JSON structure:
 {{
-  "title": "short descriptive title",
+  "title": "specific title naming the vulnerability and target (e.g. SQL Injection Login Bypass)",
   "vuln_type": "{vuln_type}",
-  "description": "2-3 sentence description of the vulnerability and why it matters",
+  "description": "2-3 sentence description of this specific vulnerability and its real-world impact",
   "difficulty": "{difficulty}",
   "steps": [
     {{
       "step": 1,
       "phase": "Reconnaissance",
-      "title": "Identify the target",
-      "description": "what to observe or do",
-      "payload": "example payload string"
+      "title": "Locate the injection point",
+      "description": "Navigate to {target_url}/login and inspect the login form fields",
+      "payload": ""
     }},
     {{
       "step": 2,
       "phase": "Exploit",
-      "title": "Inject the payload",
-      "description": "how to exploit",
-      "payload": "exploit payload"
+      "title": "Inject authentication bypass payload",
+      "description": "Enter the SQLi payload in the email field and submit",
+      "payload": "' OR '1'='1'--"
     }},
     {{
       "step": 3,
+      "phase": "Observe",
+      "title": "Confirm authentication bypass",
+      "description": "Check if login succeeds and a JWT token is returned in the response",
+      "payload": ""
+    }},
+    {{
+      "step": 4,
       "phase": "Defense",
-      "title": "Switch to Secure Mode",
-      "description": "toggle security mode and observe it is blocked",
+      "title": "Switch to Secure Mode and verify fix",
+      "description": "Toggle Security Mode ON, retry the same payload — server should return 401",
       "payload": ""
     }}
   ],
   "payloads": [
-    {{"payload": "payload string", "description": "what it does", "expected_outcome": "what happens"}}
+    {{
+      "payload": "' OR '1'='1'--",
+      "description": "Classic auth bypass — makes WHERE clause always true",
+      "expected_outcome": "Login succeeds without valid credentials, JWT token returned"
+    }},
+    {{
+      "payload": "admin'--",
+      "description": "Target specific account — comments out password check",
+      "expected_outcome": "Logs in as admin user without knowing the password"
+    }}
   ],
   "risk": {{
-    "cvss_score": 7.5,
-    "severity": "High",
+    "cvss_score": 9.8,
+    "severity": "Critical",
     "owasp_category": "A03:2021 - Injection",
-    "impact_summary": "brief impact description"
+    "impact_summary": "Attacker bypasses authentication and gains unauthorized access to all user accounts"
   }},
-  "defense_tips": ["tip 1", "tip 2", "tip 3"],
+  "defense_tips": [
+    "Use parameterized queries or prepared statements — never concatenate user input into SQL",
+    "Apply an ORM (SQLAlchemy, Django ORM) that escapes by default",
+    "Implement bcrypt password hashing to prevent plain-text comparison bypass"
+  ],
   "code_examples": {{
-    "vulnerable": "# vulnerable code example",
-    "secure": "# secure code example"
+    "vulnerable": "# VULNERABLE: raw SQL string concatenation\\nquery = f\\"SELECT * FROM users WHERE email='{{email}}' AND password='{{password}}'\\\"\\ncursor.execute(query)\\n# Payload ' OR '1'='1'-- transforms the query to:\\n# SELECT * FROM users WHERE email='' OR '1'='1'--' AND password='x'\\n# Always returns the first row → login bypassed",
+    "secure": "# SECURE: parameterized query — payload treated as literal string\\nquery = \\"SELECT * FROM users WHERE email=? AND password=?\\"\\ncursor.execute(query, (email, password))\\n# The payload ' OR \\'1\\'=\\'1\\'-- is never interpreted as SQL\\n# It becomes a literal string comparison that fails normally"
   }}
-}}"""
+}}
+
+IMPORTANT: Replace the example above with real content specific to {vuln_type}.
+The step payloads, code examples, and descriptions must match the actual vulnerability type."""
 
 RETRY_PROMPT_TEMPLATE = """\
 Return a minimal valid JSON for a {vuln_type} security scenario at {difficulty} level.
-Use ONLY these exact keys: title, vuln_type, description, difficulty, steps, payloads, risk, defense_tips, code_examples.
-steps must be an array with at least one object having: step, phase, title, description, payload.
-payloads must be an array with at least one object having: payload, description, expected_outcome.
-risk must have: cvss_score (number), severity (string), owasp_category (string), impact_summary (string).
-code_examples must have: vulnerable (string), secure (string).
-defense_tips must be an array of strings.
+Target URL: {target_url}
+
+Required keys: title, vuln_type, description, difficulty, steps, payloads, risk, defense_tips, code_examples.
+
+STRICT CONTENT RULES:
+- steps[].payload must be actual exploit strings, NOT "example payload string" or "exploit payload"
+- code_examples.vulnerable must be real broken code (at least 5 lines), NOT "# vulnerable code example"
+- code_examples.secure must be real fixed code (at least 5 lines), NOT "# secure code example"
+- payloads[].payload must be real strings like "' OR '1'='1'--" or "<script>alert(1)</script>"
+- Use {target_url} in step descriptions
+
 Return ONLY the JSON object, nothing else."""
 
 
@@ -119,7 +175,6 @@ def _extract_json_robust(text: str, vuln_type: str = "", difficulty: str = "") -
         fragment = text[start:]
         opens_brace   = fragment.count("{") - fragment.count("}")
         opens_bracket = fragment.count("[") - fragment.count("]")
-        # close any open string first (naive: just try both)
         for suffix in ['"}' * opens_brace, "}" * opens_brace]:
             try:
                 repaired = fragment + "]" * max(0, opens_bracket) + suffix
@@ -154,22 +209,19 @@ def _extract_json_robust(text: str, vuln_type: str = "", difficulty: str = "") -
         "difficulty": difficulty,
         "steps": [
             {
-                "step": 1,
-                "phase": "Reconnaissance",
+                "step": 1, "phase": "Reconnaissance",
                 "title": "Identify the attack surface",
                 "description": f"Locate input fields or endpoints susceptible to {name}.",
-                "payload": "Manual inspection required",
+                "payload": "",
             },
             {
-                "step": 2,
-                "phase": "Exploit",
+                "step": 2, "phase": "Exploit",
                 "title": "Test the vulnerability",
                 "description": "Send a crafted payload and observe the response.",
-                "payload": "See OWASP documentation for sample payloads",
+                "payload": "",
             },
             {
-                "step": 3,
-                "phase": "Defense",
+                "step": 3, "phase": "Defense",
                 "title": "Apply the fix",
                 "description": "Toggle to Secure Mode and verify the same payload is blocked.",
                 "payload": "",
@@ -177,8 +229,8 @@ def _extract_json_robust(text: str, vuln_type: str = "", difficulty: str = "") -
         ],
         "payloads": [
             {
-                "payload": "Manual testing required",
-                "description": f"Payloads for {name}",
+                "payload": "",
+                "description": f"Payloads for {name} — see OWASP documentation",
                 "expected_outcome": "Depends on application behaviour",
             }
         ],
@@ -212,7 +264,7 @@ class OllamaProvider(BaseProvider):
         self._model = model
         print(f"[OllamaProvider] init: base_url={base_url} model={model}", flush=True)
 
-    # ── BaseProvider abstract methods (satisfy interface; not used in single-shot path) ──
+    # ── BaseProvider abstract methods ──────────────────────────────────────────
 
     async def generate(
         self,
@@ -245,19 +297,24 @@ class OllamaProvider(BaseProvider):
     # ── Main entry point — single-shot, never raises ──────────────────────────
 
     async def run_agent_loop(
-        self, vuln_type: str, difficulty: str = "beginner"
+        self,
+        vuln_type: str,
+        difficulty: str = "beginner",
+        target_url: str = "",
+        session_id: int = 0,
     ) -> dict[str, Any]:
         """
         Skips the tool-use loop entirely (llama3.2 is unreliable with function calling).
         Runs all three tools locally, embeds results in prompt, asks for one JSON response.
         Retries once with a simpler prompt on parse failure. Never raises.
         """
-        print(f"[OllamaProvider] single-shot: vuln_type={vuln_type} difficulty={difficulty}", flush=True)
+        _target = target_url or "http://localhost:8000"
+        print(f"[OllamaProvider] single-shot: vuln_type={vuln_type} difficulty={difficulty} target={_target}", flush=True)
 
         # ── Gather tool data locally ──────────────────────────────────────────
         try:
             payloads_data = await run_payloads(
-                {"vuln_type": vuln_type, "difficulty": difficulty, "context": "demo app"}
+                {"vuln_type": vuln_type, "difficulty": difficulty, "context": f"demo app at {_target}"}
             )
         except Exception:
             payloads_data = {"payloads": []}
@@ -273,6 +330,7 @@ class OllamaProvider(BaseProvider):
         user_prompt = USER_PROMPT_TEMPLATE.format(
             vuln_type=vuln_type,
             difficulty=difficulty,
+            target_url=_target,
             payloads_json=json.dumps(payloads_data.get("payloads", [])[:3]),
             risk_json=json.dumps(risk_data),
         )
@@ -287,7 +345,9 @@ class OllamaProvider(BaseProvider):
 
         # ── Attempt 2: simpler retry prompt ──────────────────────────────────
         print("[OllamaProvider] attempt-1 JSON incomplete; retrying with simpler prompt", flush=True)
-        retry_prompt = RETRY_PROMPT_TEMPLATE.format(vuln_type=vuln_type, difficulty=difficulty)
+        retry_prompt = RETRY_PROMPT_TEMPLATE.format(
+            vuln_type=vuln_type, difficulty=difficulty, target_url=_target
+        )
         text2 = await self._call(retry_prompt)
         print(f"[OllamaProvider] attempt-2 response ({len(text2)} chars): {text2[:120]!r}", flush=True)
 

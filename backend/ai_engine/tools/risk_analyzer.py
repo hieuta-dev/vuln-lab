@@ -5,8 +5,16 @@
 TOOL_SPEC = {
     "name": "analyze_risk",
     "description": (
-        "Calculate a CVSS-style risk score and structured risk analysis "
-        "for a vulnerability in context."
+        "Calculates a CVSS-style risk score based on confirmed probe evidence.\n\n"
+        "WHEN TO CALL: LAST tool to call, only after vulnerability is confirmed. "
+        "Do NOT call if status will be 'passed' — no risk score needed for clean checks.\n\n"
+        "SCORING RULES:\n"
+        "- Base score on actual confirmed evidence, not theoretical worst case\n"
+        "- attack_vector=network for web vulnerabilities (default)\n"
+        "- authentication_required=false if exploit works without login\n"
+        "- Confirmed SQLi login bypass → cvss_score >= 9.0\n"
+        "- Missing header only → cvss_score <= 5.0\n"
+        "- Confirmed XSS with cookie theft → cvss_score >= 7.0"
     ),
     "input_schema": {
         "type": "object",

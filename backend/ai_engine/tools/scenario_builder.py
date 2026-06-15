@@ -5,8 +5,18 @@
 TOOL_SPEC = {
     "name": "build_attack_steps",
     "description": (
-        "Build a numbered step-by-step attack narrative for a vulnerability scenario. "
-        "Steps guide a learner through reconnaissance, exploitation, and impact."
+        "Builds numbered step-by-step reproduction instructions from confirmed probe evidence.\n\n"
+        "WHEN TO CALL: ONLY after a vulnerability is confirmed by probe results. "
+        "Do NOT call if all probes returned no evidence — write 'No vulnerability found' instead.\n\n"
+        "INPUT REQUIREMENTS:\n"
+        "- target_field: must be a real endpoint found during probing "
+        "(e.g. 'POST /api/Users/login on http://juice-shop:3000'), NOT a generic description\n"
+        "- payloads: use actual payloads that produced evidence during probing\n"
+        "- include_defense: always true\n\n"
+        "OUTPUT RULES:\n"
+        "- Steps must be numbered actions only: Navigate, Enter, Click, Observe\n"
+        "- NEVER include 'Finding:' text inside a numbered step\n"
+        "- Replace [target_url] with the actual scanned URL"
     ),
     "input_schema": {
         "type": "object",
@@ -14,7 +24,11 @@ TOOL_SPEC = {
             "vuln_type": {"type": "string"},
             "target_field": {
                 "type": "string",
-                "description": "The specific UI field or endpoint (e.g. 'username field on /login')"
+                "description": (
+                    "The specific endpoint or UI field where the vulnerability was confirmed. "
+                    "Must include actual URL, e.g. 'POST /api/Users/login on http://juice-shop:3000'. "
+                    "NOT a generic description like 'login form'."
+                )
             },
             "payloads": {
                 "type": "array",

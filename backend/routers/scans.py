@@ -14,6 +14,7 @@ from models.scan_result import ScanResult
 from models.scan_session import ScanSession
 from models.scan_target import ScanTarget
 from services.scan_service import VULN_TYPES, run_scan
+from services.elk_logger import elk
 
 router = APIRouter(prefix="/api/scans", tags=["scans"])
 
@@ -63,6 +64,15 @@ async def start_scan(
 
     await db.commit()
     await db.refresh(session)
+
+    # ELK: log scan request for audit trail
+    elk.log_scan_request(
+        session_id=session.id,
+        target_url=body.target_url,
+        target_name=body.target_name,
+        user=current_user.get("username", "unknown"),
+        vuln_types=VULN_TYPES,
+    )
 
     background_tasks.add_task(run_scan, session.id, body.target_url, body.auth_info)
     return {"session_id": session.id, "target_id": target.id, "status": "pending"}

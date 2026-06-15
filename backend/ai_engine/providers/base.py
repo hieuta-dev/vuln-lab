@@ -1,51 +1,48 @@
 # FILE: backend/ai_engine/providers/base.py
-# PURPOSE: Abstract base class defining the LLM provider interface
+# PURPOSE: Abstract base class + shared agentic tool loop with input validation and ELK logging
 # SECURITY NOTE: Concrete providers must never log API keys or raw tool payloads
 
 import json
+import logging
 import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
 from ..tools.payload_generator import TOOL_SPEC as PAYLOAD_SPEC, execute as run_payloads
-from ..tools.scenario_builder import TOOL_SPEC as STEPS_SPEC, execute as run_steps
-from ..tools.risk_analyzer import TOOL_SPEC as RISK_SPEC, execute as run_risk
+from ..tools.scenario_builder  import TOOL_SPEC as STEPS_SPEC,   execute as run_steps
+from ..tools.risk_analyzer     import TOOL_SPEC as RISK_SPEC,    execute as run_risk
+from ..tools.http_probe        import TOOL_SPEC as HTTP_SPEC,    execute as run_http_probe
+from ..tools.check_endpoint    import TOOL_SPEC as ENDPOINT_SPEC, execute as run_check_endpoint
+from ..tools.inject_probe      import TOOL_SPEC as INJECT_SPEC,  execute as run_inject_probe
+from ..prompts import SYSTEM_PROMPT, SYSTEM_SCAN_PROMPT
 
+logger = logging.getLogger(__name__)
+
+# ── Tool registries ───────────────────────────────────────────────────────────
+
+# All 6 tools (used when a target_url is provided — full scan mode)
+ALL_TOOLS_SCAN = [HTTP_SPEC, ENDPOINT_SPEC, INJECT_SPEC, PAYLOAD_SPEC, STEPS_SPEC, RISK_SPEC]
+
+# Legacy 3 tools (scenario lab — no live target)
 ALL_TOOLS = [PAYLOAD_SPEC, STEPS_SPEC, RISK_SPEC]
 
 EXECUTORS: dict[str, Any] = {
-    "generate_payloads": run_payloads,
+    "generate_payloads":  run_payloads,
     "build_attack_steps": run_steps,
-    "analyze_risk": run_risk,
+    "analyze_risk":       run_risk,
+    "http_probe":         run_http_probe,
+    "check_endpoint":     run_check_endpoint,
+    "inject_probe":       run_inject_probe,
 }
 
-SYSTEM_PROMPT = """You are a cybersecurity education assistant creating structured lab
-scenarios for OWASP Top 10 training.
-
-When asked to generate a scenario:
-1. Call generate_payloads to get relevant attack payloads
-2. Call build_attack_steps to build a step-by-step attack guide
-3. Call analyze_risk to add a CVSS risk assessment
-4. Return ONLY a JSON object (no markdown fences) with this exact shape:
-
-{
-  "title": "...",
-  "vuln_type": "...",
-  "description": "2-3 sentence summary of what this vulnerability is and why it matters",
-  "difficulty": "beginner|intermediate|advanced",
-  "steps": [{"step":1,"phase":"...","title":"...","description":"...","payload":"..."}],
-  "payloads": [{"payload":"...","description":"...","expected_outcome":"..."}],
-  "risk": {"cvss_score":0.0,"severity":"...","owasp_category":"...","impact_summary":"..."},
-  "defense_tips": ["tip1","tip2","tip3"],
-  "code_examples": {
-    "vulnerable": "// vulnerable code snippet",
-    "secure": "// secure code snippet"
-  }
-}
-
-Always call all three tools before writing the final JSON.
-"""
+# Domains that must never be probed (block hallucinated documentation URLs)
+_BLOCKED_DOMAINS = [
+    "github.io", "github.com", "owasp.org",
+    "example.com", "localhost:5432", "169.254.",
+    "127.0.0.1:543", "w3schools",
+]
 
 USER_PROMPT_TEMPLATE = (
     "Generate a complete lab scenario for vulnerability: '{vuln_type}' "
@@ -54,6 +51,17 @@ USER_PROMPT_TEMPLATE = (
     "Call all three tools, then return the final JSON."
 )
 
+USER_PROMPT_SCAN_TEMPLATE = (
+    "Scan target URL: {target_url}\n"
+    "Vulnerability type to test: {vuln_type}\n"
+    "Difficulty level: {difficulty}\n\n"
+    "Follow the mandatory tool call order from the system prompt. "
+    "Start with http_probe on the target URL, then check_endpoint, then inject_probe "
+    "if inputs are found. Return the final JSON."
+)
+
+
+# ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class ToolCall:
@@ -65,9 +73,9 @@ class ToolCall:
 @dataclass
 class ProviderResponse:
     stop_reason: str               # "end_turn" | "tool_use"
-    text: str | None               # populated when stop_reason == "end_turn"
+    text: str | None
     tool_calls: list[ToolCall] = field(default_factory=list)
-    raw: Any = None                # raw SDK response kept for provider-specific history building
+    raw: Any = None
 
 
 def _extract_json(text: str) -> dict:
@@ -79,8 +87,50 @@ def _extract_json(text: str) -> dict:
         match = re.search(r"\{.*\}", text, re.DOTALL)
         if match:
             return json.loads(match.group())
-    raise ValueError(f"Could not extract valid JSON from response text")
+    raise ValueError("Could not extract valid JSON from response text")
 
+
+# ── Input validation ──────────────────────────────────────────────────────────
+
+def validate_tool_input(tool_name: str, tool_input: dict, target_url: str) -> dict:
+    """
+    Validates and corrects tool inputs before execution.
+    Prevents the agent from calling wrong URLs (documentation, GitHub, etc.).
+    """
+    inp = dict(tool_input)  # shallow copy — don't mutate caller's dict
+
+    if tool_name == "http_probe":
+        url = inp.get("url", "")
+        needs_fix = not url or any(d in url for d in _BLOCKED_DOMAINS)
+        if not needs_fix and target_url:
+            # Ensure URL uses the scan target's origin
+            try:
+                target_origin = "/".join(target_url.split("/")[:3])  # scheme://host:port
+                if not url.startswith(target_origin):
+                    needs_fix = True
+            except Exception:
+                pass
+        if needs_fix and target_url:
+            logger.warning("[validate_tool_input] http_probe URL corrected: %s → %s", url, target_url)
+            inp["url"] = target_url
+            inp["_url_corrected"] = True
+
+    elif tool_name == "check_endpoint":
+        base = inp.get("base_url", "")
+        if not base or any(d in base for d in _BLOCKED_DOMAINS):
+            logger.warning("[validate_tool_input] check_endpoint base_url corrected: %s → %s", base, target_url)
+            inp["base_url"] = target_url
+
+    elif tool_name == "inject_probe":
+        url = inp.get("url", "")
+        if not url or any(d in url for d in _BLOCKED_DOMAINS):
+            logger.warning("[validate_tool_input] inject_probe URL corrected: %s → %s", url, target_url)
+            inp["url"] = target_url
+
+    return inp
+
+
+# ── Abstract base provider ────────────────────────────────────────────────────
 
 class BaseProvider(ABC):
     """
@@ -88,55 +138,58 @@ class BaseProvider(ABC):
     the agentic tool loop runs in this base class via run_agent_loop().
     """
 
-    # ── abstract interface ──────────────────────────────────────────────────
-
     @abstractmethod
     async def generate(
-        self,
-        messages: list[dict],
-        tools: list[dict],
-        system: str,
+        self, messages: list[dict], tools: list[dict], system: str
     ) -> ProviderResponse:
-        """Single LLM call. Returns a normalised ProviderResponse."""
         ...
 
     @abstractmethod
     def build_assistant_message(self, response: ProviderResponse) -> dict:
-        """
-        Wrap the assistant turn in a message dict suitable for this provider's
-        message history format.
-        """
         ...
 
     @abstractmethod
     def build_tool_results_messages(
-        self,
-        tool_calls: list[ToolCall],
-        results: list[dict],
+        self, tool_calls: list[ToolCall], results: list[dict]
     ) -> list[dict]:
-        """
-        Produce the message(s) that feed tool results back to the model.
-        Anthropic uses a single user message with type=tool_result blocks;
-        OpenAI uses one role=tool message per call.
-        """
         ...
 
-    # ── shared agent loop ───────────────────────────────────────────────────
+    # ── Shared agent loop ─────────────────────────────────────────────────────
 
     async def run_agent_loop(
-        self, vuln_type: str, difficulty: str = "beginner"
+        self,
+        vuln_type: str,
+        difficulty: str = "beginner",
+        target_url: str = "",
+        session_id: int = 0,
     ) -> dict[str, Any]:
-        messages: list[dict] = [
-            {
-                "role": "user",
-                "content": USER_PROMPT_TEMPLATE.format(
-                    vuln_type=vuln_type, difficulty=difficulty
-                ),
-            }
-        ]
+        """
+        Shared agentic tool loop used by AnthropicProvider.
+        OllamaProvider overrides this with a single-shot approach.
+        """
+        # Choose tool set and prompt based on whether we have a live target
+        if target_url:
+            tools   = ALL_TOOLS_SCAN
+            system  = SYSTEM_SCAN_PROMPT
+            user_msg = USER_PROMPT_SCAN_TEMPLATE.format(
+                target_url=target_url, vuln_type=vuln_type, difficulty=difficulty
+            )
+        else:
+            tools   = ALL_TOOLS
+            system  = SYSTEM_PROMPT
+            user_msg = USER_PROMPT_TEMPLATE.format(vuln_type=vuln_type, difficulty=difficulty)
+
+        messages: list[dict] = [{"role": "user", "content": user_msg}]
+        step_num = 0
+
+        # Lazy import to avoid circular dependency
+        try:
+            from services.elk_logger import elk as _elk
+        except Exception:
+            _elk = None
 
         for _ in range(8):
-            response = await self.generate(messages, ALL_TOOLS, SYSTEM_PROMPT)
+            response = await self.generate(messages, tools, system)
             messages.append(self.build_assistant_message(response))
 
             if response.stop_reason == "end_turn":
@@ -147,13 +200,40 @@ class BaseProvider(ABC):
             if response.stop_reason == "tool_use" and response.tool_calls:
                 results: list[dict] = []
                 for tc in response.tool_calls:
-                    executor = EXECUTORS.get(tc.name)
+                    step_num += 1
+                    validated = validate_tool_input(tc.name, tc.input, target_url)
+                    executor  = EXECUTORS.get(tc.name)
+
+                    t_start = time.time()
                     if executor:
-                        result = await executor(tc.input)
-                        results.append({"tool_call": tc, "result": result})
+                        out = await executor(validated)
+                    else:
+                        out = {"error": f"unknown tool: {tc.name}"}
+                    duration_ms = int((time.time() - t_start) * 1000)
+
+                    # ELK: log each tool call
+                    if _elk:
+                        try:
+                            _elk.log_agent_step(
+                                session_id=session_id,
+                                vuln_type=vuln_type,
+                                step_number=step_num,
+                                tool_name=tc.name,
+                                tool_input=validated,
+                                tool_output={
+                                    "success": "error" not in out,
+                                    "result_summary": str(out)[:200],
+                                },
+                                duration_ms=duration_ms,
+                            )
+                        except Exception:
+                            pass  # logging must never crash the agent
+
+                    results.append({"tool_call": tc, "result": out})
+
                 messages.extend(self.build_tool_results_messages(
                     [r["tool_call"] for r in results],
-                    [r["result"] for r in results],
+                    [r["result"]    for r in results],
                 ))
 
         raise RuntimeError("Agent loop exceeded maximum iterations")

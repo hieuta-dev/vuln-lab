@@ -9,10 +9,13 @@ import httpx
 from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+import time as _time
+
 from ai_engine.scenario_agent import generate_scenario
 from database import AsyncSessionLocal
 from models.scan_result import ScanResult
 from models.scan_session import ScanSession
+from services.elk_logger import elk
 from services.reproduce_service import generate_reproduce_steps
 
 logger = logging.getLogger(__name__)
@@ -642,6 +645,7 @@ async def probe_target(
 
 async def run_scan(session_id: int, target_url: str, auth_info: dict | None, difficulty: str = "beginner") -> None:
     """Background task: iterate all vuln types, run AI + probe, persist results."""
+    _session_start = _time.time()
     async with AsyncSessionLocal() as db:
         await db.execute(
             update(ScanSession).where(ScanSession.id == session_id).values(status="running")
@@ -670,7 +674,10 @@ async def run_scan(session_id: int, target_url: str, auth_info: dict | None, dif
                 # Generate AI scenario
                 scenario_data: dict = {}
                 try:
-                    scenario_data = await generate_scenario(vuln_type, difficulty)
+                    scenario_data = await generate_scenario(
+                        vuln_type, difficulty,
+                        session_id=session_id, target_url=target_url
+                    )
                     from models.scenario import Scenario as ScenarioModel
                     sc = ScenarioModel(
                         vuln_type=vuln_type,
@@ -686,6 +693,7 @@ async def run_scan(session_id: int, target_url: str, auth_info: dict | None, dif
                     logger.warning("Scenario generation failed for %s: %s", vuln_type, exc)
 
                 # HTTP probe (generic)
+                _probe_start = _time.time()
                 probe = await probe_target(client, target_url, vuln_type, auth_info)
 
                 # Juice Shop-specific probe sequences (ADD — never remove generic probe above)
@@ -715,6 +723,34 @@ async def run_scan(session_id: int, target_url: str, auth_info: dict | None, dif
                 )
                 await db.commit()
 
+                # ELK: log per-vuln result
+                _probe_ms = int((_time.time() - _probe_start) * 1000)
+                findings_obj = result_row.findings or {}
+                elk.log_scan_result(
+                    session_id=session_id,
+                    vuln_type=vuln_type,
+                    status=result_row.status,
+                    severity=result_row.severity,
+                    finding_summary=findings_obj.get("summary", ""),
+                    scenarios_tested=findings_obj.get("tested_scenarios", 0),
+                    scenarios_confirmed=len(findings_obj.get("confirmed_scenarios", [])),
+                    total_duration_ms=_probe_ms,
+                )
+
+                # ELK: log each Juice Shop probe result individually
+                for sc in findings_obj.get("scenario_results", []):
+                    elk.log_probe_result(
+                        session_id=session_id,
+                        vuln_type=vuln_type,
+                        scenario_name=sc.get("name", ""),
+                        method=sc.get("request", {}).get("method", "GET"),
+                        url=sc.get("request", {}).get("url", ""),
+                        status_code=0,
+                        confirmed=bool(sc.get("confirmed")),
+                        evidence=sc.get("evidence", ""),
+                        duration_ms=0,
+                    )
+
         await db.execute(
             update(ScanSession).where(ScanSession.id == session_id).values(
                 status="completed",
@@ -722,6 +758,25 @@ async def run_scan(session_id: int, target_url: str, auth_info: dict | None, dif
             )
         )
         await db.commit()
+
+        # ELK: log session completion summary
+        from sqlalchemy import select as _select
+        all_results = (await db.execute(
+            _select(ScanResult).where(ScanResult.session_id == session_id)
+        )).scalars().all()
+        n_vuln = sum(1 for r in all_results if r.status == "success" and r.severity)
+        sev_rank = ["critical", "high", "medium", "low"]
+        highest = next(
+            (s for s in sev_rank if any(r.severity == s for r in all_results)), None
+        )
+        elk.log_session_complete(
+            session_id=session_id,
+            target_url=target_url,
+            total_checks=len(all_results),
+            vulnerabilities_found=n_vuln,
+            highest_severity=highest,
+            total_duration_ms=int((_time.time() - _session_start) * 1000),
+        )
 
 
 async def _get_or_create_result(db: AsyncSession, session_id: int, vuln_type: str) -> ScanResult:

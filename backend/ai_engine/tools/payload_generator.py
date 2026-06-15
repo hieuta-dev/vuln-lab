@@ -5,9 +5,15 @@
 TOOL_SPEC = {
     "name": "generate_payloads",
     "description": (
-        "Generate a list of attack payloads for a given vulnerability type. "
-        "Returns payloads ordered from basic to advanced. "
-        "Each payload includes the raw string, what it does, and expected outcome."
+        "Returns a curated list of educational attack payloads for a vulnerability type, "
+        "ordered from basic to advanced.\n\n"
+        "WHEN TO CALL: AFTER http_probe and check_endpoint have confirmed an attack "
+        "surface exists. Use payload results to populate reproduce_steps — NOT to "
+        "actually send payloads to the target (use inject_probe for active testing).\n\n"
+        "DECISION LOGIC:\n"
+        "- Use returned payloads to write the 'How to Reproduce' section\n"
+        "- Select payloads matching the difficulty level requested\n"
+        "- Do NOT pass these payloads to inject_probe — inject_probe uses safe canary strings"
     ),
     "input_schema": {
         "type": "object",

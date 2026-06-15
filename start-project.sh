@@ -133,3 +133,38 @@ echo ""
 echo "📜 Logs:"
 echo "   docker-compose logs -f"
 echo "══════════════════════════════════════"
+
+# ─────────────────────────────────────────
+# ELK STACK
+# ─────────────────────────────────────────
+echo ""
+echo "⏳ Waiting for Elasticsearch..."
+for i in {1..30}; do
+  if curl -s http://localhost:9200/_cluster/health 2>/dev/null | grep -q '"status"'; then
+    echo "   ✅ Elasticsearch ready (${i}×2s)"
+    break
+  fi
+  sleep 2
+  if [[ $i == 30 ]]; then
+    echo "   ⚠️  Elasticsearch slow — check: docker-compose logs elasticsearch"
+  fi
+done
+
+echo "⏳ Waiting for Kibana..."
+for i in {1..40}; do
+  if curl -s http://localhost:5601/api/status 2>/dev/null | grep -q "available"; then
+    echo "   ✅ Kibana ready (${i}×3s)"
+    break
+  fi
+  sleep 3
+  if [[ $i == 40 ]]; then
+    echo "   ⚠️  Kibana slow — check: docker-compose logs kibana"
+  fi
+done
+
+echo "🗂  Setting up Kibana index patterns..."
+bash "$(dirname "$0")/monitoring/kibana/setup.sh"
+
+echo ""
+echo "📊 Kibana dashboard : http://localhost:5601"
+echo "🔍 Elasticsearch   : http://localhost:9200"
