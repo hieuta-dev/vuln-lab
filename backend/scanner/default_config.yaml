@@ -1,0 +1,15 @@
+# FILE: backend/scanner/default_config.yaml
+# PURPOSE: Default safe scanner configuration for local lab targets
+# SECURITY NOTE: Keep base_url pointed at explicit local/authorized targets only
+
+scanner:
+  base_url: "http://localhost:3000"
+  max_requests_per_run: 100
+  rate_limit_per_second: 2
+  enable_xss_tests: true
+  enable_sqli_tests: true
+  enable_auth_tests: true
+  enable_access_control_tests: true
+  enable_upload_tests: true
+  enable_api_tests: true
+  lab_mode: true
